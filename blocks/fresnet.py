@@ -96,6 +96,51 @@ class BasicBlockV1(HybridBlock):
         return x
 
 
+class BasicBlockV3(HybridBlock):
+    r"""BasicBlock V1 from `"Deep Residual Learning for Image Recognition"
+    <http://arxiv.org/abs/1512.03385>`_ paper.
+    This is used for ResNet V1 for 18, 34 layers.
+
+    Parameters
+    ----------
+    channels : int
+        Number of output channels.
+    stride : int
+        Stride size.
+    downsample : bool, default False
+        Whether to downsample the input.
+    in_channels : int, default 0
+        Number of input channels. Default is 0, to infer from the graph.
+    """
+    def __init__(self, channels, stride, downsample=False, in_channels=0, act_type = 'relu', **kwargs):
+        super(BasicBlockV3, self).__init__(**kwargs)
+        self.act_type = act_type
+        self.body = nn.HybridSequential(prefix='')
+        self.body.add(nn.BatchNorm(epsilon=2e-5))
+        self.body.add(_conv3x3(channels, 1, in_channels))
+        self.body.add(nn.BatchNorm(epsilon=2e-5))
+        self.body.add(_act(act_type))
+        self.body.add(_conv3x3(channels, stride, channels))
+        self.body.add(nn.BatchNorm(epsilon=2e-5))
+        if downsample:
+            self.downsample = nn.HybridSequential(prefix='')
+            self.downsample.add(nn.Conv2D(channels, kernel_size=1, strides=stride,
+                                          use_bias=False, in_channels=in_channels))
+            self.downsample.add(nn.BatchNorm(epsilon=2e-5))
+        else:
+            self.downsample = None
+
+    def hybrid_forward(self, F, x):
+        residual = x
+
+        x = self.body(x)
+
+        if self.downsample:
+            residual = self.downsample(residual)
+
+        x = x+residual
+        return x
+
 class BasicBlockV2(HybridBlock):
     r"""BasicBlock V2 from
     `"Identity Mappings in Deep Residual Networks"
@@ -158,11 +203,12 @@ class ResNet(HybridBlock):
     thumbnail : bool, default False
         Enable thumbnail.
     """
-    def __init__(self, layers, channels, classes, **kwargs):
+    def __init__(self, layers, channels, classes, use_dropout, **kwargs):
         super(ResNet, self).__init__(**kwargs)
         assert len(layers) == len(channels) - 1
-        self.act_type = 'relu'
-        block = BasicBlockV1
+        self.act_type = 'prelu'
+        block = BasicBlockV3
+        print('use_dropout:', use_dropout)
         with self.name_scope():
             self.features = nn.HybridSequential(prefix='')
             #self.features.add(nn.BatchNorm(scale=False, center=False))
@@ -179,11 +225,15 @@ class ResNet(HybridBlock):
                                                    stride, i+1, in_channels=in_channels))
                 in_channels = channels[i+1]
             self.features.add(nn.BatchNorm(epsilon=2e-5))
+            if use_dropout:
+              self.features.add(nn.Dropout(0.4))
+            self.features.add(nn.Flatten())
             #self.features.add(_act(self.act_type))
             #self.features.add(nn.GlobalAvgPool2D())
-            self.features.add(nn.Flatten())
-            self.features.add(nn.Dense(classes, in_units=in_channels*7*7))
+            #self.features.add(nn.Dense(classes, in_units=in_channels*7*7))
+            self.features.add(nn.Dense(classes))
             self.features.add(nn.BatchNorm(scale=False, epsilon=2e-5))
+            #self.features.add(nn.BatchNorm(epsilon=2e-5))
 
     def _make_layer(self, block, layers, channels, stride, stage_index, in_channels=0):
         layer = nn.HybridSequential(prefix='stage%d_'%stage_index)
@@ -211,11 +261,11 @@ resnet_spec = {18: ('basic_block', [2, 2, 2, 2], [64, 64, 128, 256, 512]),
 
 
 # Constructor
-def get(num_layers, num_classes):
+def get(num_layers, num_classes, use_dropout):
     assert num_layers in resnet_spec, \
         "Invalid number of layers: %d. Options are %s"%(
             num_layers, str(resnet_spec.keys()))
     block_type, layers, channels = resnet_spec[num_layers]
-    net = ResNet(layers, channels, num_classes)
+    net = ResNet(layers, channels, num_classes, use_dropout)
     return net
 

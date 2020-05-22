@@ -79,7 +79,7 @@ class FaceDataset(Dataset):
         #    img = img[:,::-1,:]
         if self.transform is not None:
             img = self.transform(img)
-            #img -= 0.5
+            img = 2*img-1.0
         return img, label
 
 if __name__ == '__main__':

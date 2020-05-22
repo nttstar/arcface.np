@@ -199,6 +199,7 @@ def load_bin(path, image_size):
     _bin = bins[i]
     img = mx.image.imdecode(_bin)
     img = transform(img)
+    img = 2*img - 1
     #img = img.transpose( (2,0,1) )
     #img = nd.transpose(img, axes=(2, 0, 1))
     for flip in [0,1]:
@@ -224,7 +225,7 @@ def test(data_set, net, ctx, batch_size, nfolds=10):
     while ba<data.shape[0]:
       bb = min(ba+batch_size, data.shape[0])
       count = bb-ba
-      x = data[(bb-batch_size):bb, :,:,:]
+      x = data[ba:bb, :,:,:]
       #print(ba, bb)
       #x = nd.slice_axis(data, axis=0, begin=bb-batch_size, end=bb)
       #print(_data.shape, _label.shape)
@@ -235,49 +236,42 @@ def test(data_set, net, ctx, batch_size, nfolds=10):
       for x in xs:
         with mx.autograd.predict_mode():
           z = net(x)
-        zs.append(z)
-      zss = []
-      for z in zs:
-        zss.append(z.asnumpy())
-      zss = np.concatenate(zss, axis=0)
+        zs.append(z.asnumpy())
+      _embeddings = np.concatenate(zs, axis=0)
       #print(zss.shape)
-      _embeddings = zss
-      #_arg, _aux = model.get_params()
-      #__arg = {}
-      #for k,v in _arg.iteritems():
-      #  __arg[k] = v.as_in_context(_ctx)
-      #_arg = __arg
-      #_arg["data"] = _data.as_in_context(_ctx)
-      #_arg["softmax_label"] = _label.as_in_context(_ctx)
-      #for k,v in _arg.iteritems():
-      #  print(k,v.context)
-      #exe = sym.bind(_ctx, _arg ,args_grad=None, grad_req="null", aux_states=_aux)
-      #exe.forward(is_train=False)
-      #net_out = exe.outputs
-      #_embeddings = z.asnumpy()
       time_now = datetime.datetime.now()
       diff = time_now - time0
       time_consumed+=diff.total_seconds()
-      #print(_embeddings.shape)
+      #print(ba, bb, _embeddings.shape)
       if embeddings is None:
         embeddings = np.zeros( (data.shape[0], _embeddings.shape[1]) )
-      embeddings[ba:bb,:] = _embeddings[(batch_size-count):,:]
+      #embeddings[ba:bb,:] = _embeddings[(batch_size-count):,:]
+      embeddings[ba:bb,:] = _embeddings
       ba = bb
     embeddings_list.append(embeddings)
 
-  _xnorm = 0.0
-  _xnorm_cnt = 0
-  for embed in embeddings_list:
-    for i in range(embed.shape[0]):
-      _em = embed[i]
-      _norm=np.linalg.norm(_em)
-      #print(_em.shape, _norm)
-      _xnorm+=_norm
-      _xnorm_cnt+=1
-  _xnorm /= _xnorm_cnt
-
   embeddings = embeddings_list[0].copy()
-  embeddings = sklearn.preprocessing.normalize(embeddings)
+  #print(embeddings.shape)
+  xnorm = embeddings*embeddings
+  xnorm = np.sum(xnorm, axis=1)
+  xnorm = np.sqrt(xnorm)
+  xnorm = np.mean(xnorm)
+  #print('xnorm:', xnorm)
+
+  #_xnorm = 0.0
+  #_xnorm = embeddings_list[0]
+  #_xnorm_cnt = 0
+  #for embedding in embeddings_list:
+  #  for i in range(embed.shape[0]):
+  #    _em = embed[i]
+  #    _norm=np.linalg.norm(_em)
+  #    #print(_em.shape, _norm)
+  #    _xnorm+=_norm
+  #    _xnorm_cnt+=1
+  #_xnorm /= _xnorm_cnt
+
+  #embeddings = embeddings_list[0].copy()
+  #embeddings = sklearn.preprocessing.normalize(embeddings)
   acc1 = 0.0
   std1 = 0.0
   #_, _, accuracy, val, val_std, far = evaluate(embeddings, issame_list, nrof_folds=10)
@@ -291,7 +285,63 @@ def test(data_set, net, ctx, batch_size, nfolds=10):
   print('infer time', time_consumed)
   _, _, accuracy, val, val_std, far = evaluate(embeddings, issame_list, nrof_folds=nfolds)
   acc2, std2 = np.mean(accuracy), np.std(accuracy)
-  return acc1, std1, acc2, std2, _xnorm, embeddings_list
+  return acc1, std1, acc2, std2, xnorm, embeddings_list
+
+def easytest(data_set, net, ctx, batch_size):
+  print('testing verification..')
+  data_list = data_set[0]
+  issame_list = data_set[1]
+  time_consumed = 0.0
+  embeddings = None
+  for i in range( len(data_list) ):
+    data = data_list[i]
+    ba = 0
+    while ba<data.shape[0]:
+      bb = min(ba+batch_size, data.shape[0])
+      count = bb-ba
+      x = data[ba:bb, :,:,:]
+      time0 = datetime.datetime.now()
+      xs = gluon.utils.split_and_load(x, ctx_list=ctx, batch_axis=0)
+      embs = [net(x).asnumpy() for x in xs]
+      time_now = datetime.datetime.now()
+      diff = time_now - time0
+      time_consumed+=diff.total_seconds()
+      embs = np.concatenate(embs, axis=0)
+      #print(ba, bb, _embeddings.shape)
+      if embeddings is None:
+        embeddings = np.zeros( (data.shape[0], embs.shape[1]) )
+      embeddings[ba:bb,:] += embs
+      ba = bb
+
+  print('infer time', time_consumed)
+  embeddings /= len(data_list)
+  #print(embeddings.shape)
+  xnorm = embeddings*embeddings
+  xnorm = np.sum(xnorm, axis=1)
+  xnorm = np.sqrt(xnorm)
+  xnorm = np.mean(xnorm)
+  embeddings = sklearn.preprocessing.normalize(embeddings)
+  print(embeddings.shape)
+  thresholds = np.arange(0, 4, 0.01)
+  emb1 = embeddings[0::2]
+  emb2 = embeddings[1::2]
+  diff = emb1 - emb2
+  dist = np.sum(np.square(diff),1)
+  actual_issame = issame_list
+  acc_max = 0.0
+  for threshold in thresholds:
+    predict_issame = np.less(dist, threshold)
+    tp = np.sum(np.logical_and(predict_issame, actual_issame))
+    fp = np.sum(np.logical_and(predict_issame, np.logical_not(actual_issame)))
+    tn = np.sum(np.logical_and(np.logical_not(predict_issame), np.logical_not(actual_issame)))
+    fn = np.sum(np.logical_and(np.logical_not(predict_issame), actual_issame))
+  
+    tpr = 0 if (tp+fn==0) else float(tp) / float(tp+fn)
+    fpr = 0 if (fp+tn==0) else float(fp) / float(fp+tn)
+    acc = float(tp+tn)/dist.size
+    if acc>acc_max:
+      acc_max = acc
+  return xnorm, acc_max
 
 if __name__ == '__main__':
 

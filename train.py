@@ -80,7 +80,9 @@ def parse_args():
   global args
   parser = argparse.ArgumentParser(description='Train face network')
   # general
-  parser.add_argument('--data-dir', default='./faces_emore', help='training set directory')
+  #parser.add_argument('--data-dir', default='./faces_emore', help='training set directory')
+  #parser.add_argument('--data-dir', default='./ms1m-retinaface-t2', help='training set directory')
+  parser.add_argument('--data-dir', default='./faces_webface_112x112', help='training set directory')
   parser.add_argument('--prefix', default='./models/A', help='directory to save model.')
   parser.add_argument('--pretrained', default='', help='pretrained model to load')
   parser.add_argument('--ckpt', type=int, default=1, help='checkpoint saving option. 0: discard saving. 1: save when necessary. 2: always save')
@@ -96,10 +98,10 @@ def parse_args():
   parser.add_argument('--bn-mom', type=float, default=0.9, help='bn mom')
   parser.add_argument('--mom', type=float, default=0.9, help='momentum')
   parser.add_argument('--emb-size', type=int, default=512, help='embedding length')
-  parser.add_argument('--per-batch-size', type=int, default=64, help='batch size in each context')
-  parser.add_argument('--margin-m', type=float, default=0.5, help='margin for loss')
+  parser.add_argument('--batch-size', type=int, default=512, help='batch size in all')
   parser.add_argument('--margin-s', type=float, default=64.0, help='scale for feature')
   parser.add_argument('--margin-a', type=float, default=1.0, help='')
+  parser.add_argument('--margin-m', type=float, default=0.5, help='margin for loss')
   parser.add_argument('--margin-b', type=float, default=0.0, help='')
   parser.add_argument('--rand-mirror', type=int, default=1, help='if do random mirror in training')
   parser.add_argument('--cutoff', type=int, default=0, help='cut off aug')
@@ -114,8 +116,11 @@ def parse_args():
 class TrainBlock(gluon.HybridBlock):
     def __init__(self, args, **kwargs):
         super(TrainBlock, self).__init__(**kwargs)
+        use_dropout = True
+        if args.num_classes>=20000:
+          use_dropout = False
         with self.name_scope():
-          self.feat_net = fresnet.get(args.num_layers, args.emb_size)
+          self.feat_net = fresnet.get(args.num_layers, args.emb_size, use_dropout)
           initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="out", magnitude=2) #resnet style
           self.feat_net.initialize(init=initializer)
           self.margin_block = ArcMarginBlock(args)
@@ -144,7 +149,8 @@ def train_net(args):
     args.ctx_num = len(ctx)
     args.num_layers = int(args.network[1:])
     print('num_layers', args.num_layers)
-    args.batch_size = args.per_batch_size*args.ctx_num
+    assert args.batch_size%args.ctx_num==0
+    args.per_batch_size = args.batch_size//args.ctx_num
     args.image_channel = 3
 
     data_dir = args.data_dir
@@ -196,19 +202,19 @@ def train_net(args):
       for name in args.eval.split(','):
         path = os.path.join(data_dir,name+".bin")
         if os.path.exists(path):
+          print('loading ver-set:', name)
           data_set = verification.load_bin(path, image_size)
           ver_list.append(data_set)
           ver_name_list.append(name)
-          print('ver', name)
 
     def ver_test(nbatch):
       results = []
       for i in range(len(ver_list)):
-        acc1, std1, acc2, std2, xnorm, embeddings_list = verification.test(ver_list[i], net.feat_net, ctx, batch_size = args.batch_size)
-        print('[%s][%d]XNorm: %f' % (ver_name_list[i], nbatch, xnorm))
+        xnorm, acc = verification.easytest(ver_list[i], net.feat_net, ctx, batch_size = args.batch_size)
+        print('[%s][%d]Accuracy-XNorm: %.5f - %.5f' % (ver_name_list[i], nbatch, acc, xnorm))
         #print('[%s][%d]Accuracy: %1.5f+-%1.5f' % (ver_name_list[i], nbatch, acc1, std1))
-        print('[%s][%d]Accuracy-Flip: %1.5f+-%1.5f' % (ver_name_list[i], nbatch, acc2, std2))
-        results.append(acc2)
+        #print('[%s][%d]Accuracy-Flip: %1.5f+-%1.5f' % (ver_name_list[i], nbatch, acc2, std2))
+        results.append(acc)
       return results
 
 
@@ -218,36 +224,15 @@ def train_net(args):
     highest_acc = [0.0, 0.0]  #lfw and target
     global_step = [0]
     save_step = [0]
-    lr_steps = [100000, 160000, 220000]
+    lr_steps = [20000, 28000, 32000]
+    if args.num_classes>=20000:
+      lr_steps = [100000, 160000, 220000]
     print('lr_steps', lr_steps)
 
     kv = mx.kv.create('device')
-    #kv = mx.kv.create('local')
-    #_rescale = 1.0/args.ctx_num
-    #opt = optimizer.SGD(learning_rate=args.lr, momentum=args.mom, wd=args.wd, rescale_grad=_rescale)
-    #opt = optimizer.SGD(learning_rate=args.lr, momentum=args.mom, wd=args.wd)
-    if args.mode=='gluon':
-      trainer = gluon.Trainer(net.collect_params(), 'sgd', 
-              {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.mom, 'multi_precision': True},
-              kvstore=kv)
-    else:
-      _rescale = 1.0/args.ctx_num
-      opt = optimizer.SGD(learning_rate=args.lr, momentum=args.mom, wd=args.wd, rescale_grad=_rescale)
-      _cb = mx.callback.Speedometer(args.batch_size, 20)
-      arg_params = None
-      aux_params = None
-      data = mx.sym.var('data')
-      label = mx.sym.var('softmax_label')
-      if args.margin_a>0.0:
-        fc7 = net(data, label)
-      else:
-        fc7 = net(data)
-      #sym = mx.symbol.SoftmaxOutput(data=fc7, label = label, name='softmax', normalization='valid')
-      ceop = gluon.loss.SoftmaxCrossEntropyLoss()
-      loss = ceop(fc7, label) 
-      #loss = loss/args.per_batch_size
-      loss = mx.sym.mean(loss)
-      sym = mx.sym.Group( [mx.symbol.BlockGrad(fc7), mx.symbol.MakeLoss(loss, name='softmax')] )
+    trainer = gluon.Trainer(net.collect_params(), 'sgd', 
+            {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.mom, 'multi_precision': True},
+            kvstore=kv)
 
     def _batch_callback():
       mbatch = global_step[0]
@@ -297,100 +282,77 @@ def train_net(args):
       if args.max_steps>0 and mbatch>args.max_steps:
         sys.exit(0)
 
-    def _batch_callback_sym(param):
-      _cb(param)
-      _batch_callback()
 
+    loss_weight = 1.0
+    #loss = gluon.loss.SoftmaxCrossEntropyLoss(weight = loss_weight)
+    #loss = nd.SoftmaxOutput
+    loss = gluon.loss.SoftmaxCrossEntropyLoss()
+    while True:
+        #trainer = update_learning_rate(opt.lr, trainer, epoch, opt.lr_factor, lr_steps)
+        tic = time.time()
+        #train_iter.reset()
+        metric.reset()
+        btic = time.time()
+        #for i, batch in enumerate(train_iter):
+        for batch_idx, (x, y) in enumerate(loader):
+            #print(x.shape, y.shape)
+            _batch_callback()
+            #data = gluon.utils.split_and_load(batch.data[0].astype(opt.dtype), ctx_list=ctx, batch_axis=0)
+            #label = gluon.utils.split_and_load(batch.label[0].astype(opt.dtype), ctx_list=ctx, batch_axis=0)
+            data = gluon.utils.split_and_load(x, ctx_list=ctx, batch_axis=0)
+            label = gluon.utils.split_and_load(y, ctx_list=ctx, batch_axis=0)
+            outputs = []
+            losses = []
+            with ag.record():
+                for _data, _label in zip(data, label):
+                    #print(y.asnumpy())
+                    fc7 = net(_data, _label)
+                    #feat = feat_net(x)
+                    #if args.margin_a>0.0:
+                    #  fc7 = margin_block(feat,y)
+                    #else:
+                    #  fc7 = margin_block(feat)
+                    #print(z[0].shape, z[1].shape)
+                    losses.append(loss(fc7, _label))
+                    outputs.append(fc7)
+            for l in losses:
+                l.backward()
+            #trainer.step(batch.data[0].shape[0], ignore_stale_grad=True)
+            #trainer.step(args.ctx_num)
+            n = x.shape[0]
+            #print(n,n)
+            trainer.step(n)
+            metric.update(label, outputs)
+            i = batch_idx
+            if i>0 and i%20==0:
+                name, acc = metric.get()
+                if len(name)==2:
+                  logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f, %s=%f'%(
+                                 num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0], name[1], acc[1]))
+                else:
+                  logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f'%(
+                                 num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0]))
+                #metric.reset()
+            btic = time.time()
 
-    if args.mode!='gluon':
-      model = mx.mod.Module(
-          context       = ctx,
-          symbol        = sym,
-      )
-      model.fit(train_iter,
-          begin_epoch        = 0,
-          num_epoch          = args.end_epoch,
-          eval_data          = None,
-          eval_metric        = metric,
-          kvstore            = 'device',
-          optimizer          = opt,
-          initializer        = initializer,
-          arg_params         = arg_params,
-          aux_params         = aux_params,
-          allow_missing      = True,
-          batch_end_callback = _batch_callback_sym,
-          epoch_end_callback = None )
-    else:
-      loss_weight = 1.0
-      #loss = gluon.loss.SoftmaxCrossEntropyLoss(weight = loss_weight)
-      #loss = nd.SoftmaxOutput
-      loss = gluon.loss.SoftmaxCrossEntropyLoss()
-      while True:
-          #trainer = update_learning_rate(opt.lr, trainer, epoch, opt.lr_factor, lr_steps)
-          tic = time.time()
-          #train_iter.reset()
-          metric.reset()
-          btic = time.time()
-          #for i, batch in enumerate(train_iter):
-          for batch_idx, (x, y) in enumerate(loader):
-              #print(x.shape, y.shape)
-              _batch_callback()
-              #data = gluon.utils.split_and_load(batch.data[0].astype(opt.dtype), ctx_list=ctx, batch_axis=0)
-              #label = gluon.utils.split_and_load(batch.label[0].astype(opt.dtype), ctx_list=ctx, batch_axis=0)
-              data = gluon.utils.split_and_load(x, ctx_list=ctx, batch_axis=0)
-              label = gluon.utils.split_and_load(y, ctx_list=ctx, batch_axis=0)
-              outputs = []
-              losses = []
-              with ag.record():
-                  for x, y in zip(data, label):
-                      #print(y.asnumpy())
-                      fc7 = net(x, y)
-                      #feat = feat_net(x)
-                      #if args.margin_a>0.0:
-                      #  fc7 = margin_block(feat,y)
-                      #else:
-                      #  fc7 = margin_block(feat)
-                      #print(z[0].shape, z[1].shape)
-                      losses.append(loss(fc7, y))
-                      outputs.append(fc7)
-              for l in losses:
-                  l.backward()
-              #trainer.step(batch.data[0].shape[0], ignore_stale_grad=True)
-              #trainer.step(args.ctx_num)
-              n = x.shape[0]
-              #print(n,n)
-              trainer.step(n)
-              metric.update(label, outputs)
-              i = batch_idx
-              if i>0 and i%20==0:
-                  name, acc = metric.get()
-                  if len(name)==2:
-                    logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f, %s=%f'%(
-                                   num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0], name[1], acc[1]))
-                  else:
-                    logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f'%(
-                                   num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0]))
-                  #metric.reset()
-              btic = time.time()
+        epoch_time = time.time()-tic
 
-          epoch_time = time.time()-tic
+        # First epoch will usually be much slower than the subsequent epics,
+        # so don't factor into the average
+        if num_epochs > 0:
+          total_time = total_time + epoch_time
 
-          # First epoch will usually be much slower than the subsequent epics,
-          # so don't factor into the average
-          if num_epochs > 0:
-            total_time = total_time + epoch_time
+        #name, acc = metric.get()
+        #logger.info('[Epoch %d] training: %s=%f, %s=%f'%(num_epochs, name[0], acc[0], name[1], acc[1]))
+        logger.info('[Epoch %d] time cost: %f'%(num_epochs, epoch_time))
+        num_epochs = num_epochs + 1
+        #name, val_acc = test(ctx, val_data)
+        #logger.info('[Epoch %d] validation: %s=%f, %s=%f'%(epoch, name[0], val_acc[0], name[1], val_acc[1]))
 
-          #name, acc = metric.get()
-          #logger.info('[Epoch %d] training: %s=%f, %s=%f'%(num_epochs, name[0], acc[0], name[1], acc[1]))
-          logger.info('[Epoch %d] time cost: %f'%(num_epochs, epoch_time))
-          num_epochs = num_epochs + 1
-          #name, val_acc = test(ctx, val_data)
-          #logger.info('[Epoch %d] validation: %s=%f, %s=%f'%(epoch, name[0], val_acc[0], name[1], val_acc[1]))
-
-          # save model if meet requirements
-          #save_checkpoint(epoch, val_acc[0], best_acc)
-      if num_epochs > 1:
-          print('Average epoch time: {}'.format(float(total_time)/(num_epochs - 1)))
+        # save model if meet requirements
+        #save_checkpoint(epoch, val_acc[0], best_acc)
+    if num_epochs > 1:
+        print('Average epoch time: {}'.format(float(total_time)/(num_epochs - 1)))
 
 
 
