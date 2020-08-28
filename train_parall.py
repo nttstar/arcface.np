@@ -107,92 +107,61 @@ def parse_args():
   parser.add_argument('--cutoff', type=int, default=0, help='cut off aug')
   parser.add_argument('--eval', type=str, default='lfw,cfp_fp,agedb_30', help='verification targets')
   #parser.add_argument('--eval', type=str, default='lfw', help='verification targets')
-  parser.add_argument('--task', type=str, default='', help='')
-  parser.add_argument('--mode', type=str, default='gluon', help='')
   parser.add_argument('--gpus', type=str, default='0,1,2,3,4,5,6,7', help='')
+  parser.add_argument('--hybrid', action='store_true', help='')
   args = parser.parse_args()
   return args
 
 
-class TrainBlock(gluon.HybridBlock):
-    def __init__(self, args, **kwargs):
-        super(TrainBlock, self).__init__(**kwargs)
-        feat_with_bn = False
-        use_dropout = True
-        if args.num_classes>=20000:
-          use_dropout = False
+class FeatBlock(gluon.HybridBlock):
+    def __init__(self, args, is_train, **kwargs):
+        super(FeatBlock, self).__init__(**kwargs)
         with self.name_scope():
           self.feat_net = nn.HybridSequential(prefix='')
-          self.feat_net.add(fresnet.get(args.num_layers, args.emb_size, use_dropout))
-          if feat_with_bn:
-            #self.feat_net.add(nn.BatchNorm(scale=True, epsilon=2e-5))
-            #self.bn1_gamma = self.params.get('bn1_gamma', shape=(1, args.emb_size))
-            #self.bn1_gamma.initialize(init=mx.init.Constant(1.0))
-            self.bn1_beta = self.params.get('bn1_beta', shape=(1, args.emb_size))
-            self.bn1_beta.initialize(init=mx.init.Constant(0.0))
-          #else:
-          #  self.bn1_beta = self.params.get('bn1_beta', shape=(1, args.emb_size))
-          #  self.bn1_beta.initialize(init=mx.init.Constant(0.0))
-
-          #self.feat_net = fresnet.get(args.num_layers, args.emb_size, use_dropout)
-          initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="out", magnitude=2) #resnet style
-          self.feat_net.initialize(init=initializer)
-          #if not feat_with_bn:
-          #  self.feature_scale = nn.BatchNorm(scale=True, epsilon=2e-5)
-          #  self.feature_scale.initialize(init=initializer)
-          self.margin_block = ArcMarginBlock(args)
-          self.margin_block.initialize(init=mx.init.Normal(0.01))
-          self.feat_with_bn = feat_with_bn
-
-
-    def hybrid_forward(self, F, x, y):
-        feat = self.feat_net(x)
-        if self.feat_with_bn:
-          mean = F.np.mean(feat, axis=[0])
-          var = F.np.var(feat, axis=[0])
-          var = F.np.sqrt(var + 2e-5)
-          feat = (feat - mean) / var + bn1_beta
-        else:
-          mean = F.np.mean(feat, axis=[0])
-          var = F.np.var(feat, axis=[0])
-          var = F.np.sqrt(var + 2e-5)
-          feat = (feat - mean) / var
-          #feat = self.feature_scale(feat)
-        fc7 = self.margin_block(feat,y)
-        return fc7
-        #print(z[0].shape, z[1].shape)
-
-class TestBlock(gluon.HybridBlock):
-    def __init__(self, args, **kwargs):
-        super(TestBlock, self).__init__(**kwargs)
-        feat_with_bn = False
-        use_dropout = True
-        if args.num_classes>=20000:
-          use_dropout = False
-        with self.name_scope():
-          self.feature_scale = None
-          self.feat_net = nn.HybridSequential(prefix='')
-          self.feat_net.add(fresnet.get(args.num_layers, args.emb_size, use_dropout))
-          if feat_with_bn:
-            #self.feat_net.add(nn.BatchNorm(scale=True, epsilon=2e-5))
-            #self.bn1_gamma = self.params.get('bn1_gamma', shape=(1, args.emb_size))
-            #self.bn1_gamma.initialize(init=mx.init.Constant(1.0))
-            self.bn1_beta = self.params.get('bn1_beta', shape=(1, args.emb_size))
-            self.bn1_beta.initialize(init=mx.init.Constant(0.0))
-          #else:
-          #  self.bn1_beta = self.params.get('bn1_beta', shape=(1, args.emb_size))
-          #  self.bn1_beta.initialize(init=mx.init.Constant(0.0))
-
-          #self.feat_net = fresnet.get(args.num_layers, args.emb_size, use_dropout)
-          #initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="out", magnitude=2) #resnet style
-          #self.feat_net.initialize(init=initializer)
-          self.feat_with_bn = feat_with_bn
+          self.feat_net.add(fresnet.get(args.num_layers, args.emb_size, args.use_dropout))
+          self.is_train = is_train
+          if is_train:
+            initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="out", magnitude=2) #resnet style
+            self.feat_net.initialize(init=initializer)
+          #self.feat_with_bn = feat_with_bn
 
 
     def hybrid_forward(self, F, x):
         feat = self.feat_net(x)
+        if self.is_train:
+          mean = F.np.mean(feat, axis=[0])
+          var = F.np.var(feat, axis=[0])
+          var = F.np.sqrt(var + 2e-5)
+          feat = (feat - mean) / var
         return feat
-        #print(z[0].shape, z[1].shape)
+
+
+class NPCache():
+  def __init__(self):
+    self._cache = {}
+
+  def get(self, context, name, shape):
+    key = "%s_%s"%(name, context)
+    #print(key)
+    if not key in self._cache:
+      v = mx.np.zeros( shape=shape, ctx = context)
+      self._cache[key] = v
+    else:
+      v = self._cache[key]
+    return v
+
+  def get2(self, context, name, arr):
+    key = "%s_%s"%(name, context)
+    #print(key)
+    if not key in self._cache:
+      v = mx.np.zeros( shape=arr.shape, ctx = context)
+      self._cache[key] = v
+    else:
+      v = self._cache[key]
+    arr.copyto(v)
+    #mx.np.copy(arr, out=v)
+    return v
+
 def train_net(args):
     ctx = []
     for ctx_id in [int(x) for x in args.gpus.split(',')]:
@@ -224,6 +193,18 @@ def train_net(args):
     print('image_size', image_size)
     assert(args.num_classes>0)
     print('num_classes', args.num_classes)
+    global_num_ctx = args.ctx_num
+    if args.num_classes%global_num_ctx==0:
+      args.ctx_num_classes = args.num_classes//global_num_ctx
+    else:
+      args.ctx_num_classes = args.num_classes//global_num_ctx+1
+    args.local_num_classes = args.ctx_num_classes * args.ctx_num
+    args.local_class_start = 0
+    args.ctx_class_start = []
+    for i in range(args.ctx_num):
+
+      _c = args.local_class_start + i*args.ctx_num_classes
+      args.ctx_class_start.append(_c)
     path_imgrec = os.path.join(data_dir, "train.rec")
 
 
@@ -233,10 +214,23 @@ def train_net(args):
     begin_epoch = 0
 
     #feat_net = fresnet.get(100, 256)
-    #margin_block = ArcMarginBlock(args)
-    net = TrainBlock(args)
-    net.collect_params().reset_ctx(ctx)
-    net.hybridize()
+    #net = TrainBlock(args)
+    args.use_dropout = True
+    if args.num_classes>=20000:
+      args.use_dropout = False
+    feat_net = FeatBlock(args, is_train=True)
+    feat_net.collect_params().reset_ctx(ctx)
+    if args.hybrid:
+      feat_net.hybridize()
+    cls_nets = []
+    for i in range(args.ctx_num):
+      cls_net = ArcMarginBlock(args)
+      #cls_net.initialize(init=mx.init.Normal(0.01))
+      cls_net.collect_params().reset_ctx(mx.gpu(i))
+      if args.hybrid:
+        cls_net.hybridize()
+      cls_nets.append(cls_net)
+
 
     #initializer = mx.init.Xavier(rnd_type='gaussian', factor_type="out", magnitude=2) #resnet style
     #feat_net.initialize(ctx=ctx, init=initializer)
@@ -255,14 +249,13 @@ def train_net(args):
 
     ver_list = []
     ver_name_list = []
-    if args.task=='':
-      for name in args.eval.split(','):
-        path = os.path.join(data_dir,name+".bin")
-        if os.path.exists(path):
-          print('loading ver-set:', name)
-          data_set = verification.load_bin(path, image_size)
-          ver_list.append(data_set)
-          ver_name_list.append(name)
+    for name in args.eval.split(','):
+      path = os.path.join(data_dir,name+".bin")
+      if os.path.exists(path):
+        print('loading ver-set:', name)
+        data_set = verification.load_bin(path, image_size)
+        ver_list.append(data_set)
+        ver_name_list.append(name)
 
     def ver_test(nbatch, tnet):
       results = []
@@ -287,9 +280,16 @@ def train_net(args):
     print('lr_steps', lr_steps)
 
     kv = mx.kv.create('device')
-    trainer = gluon.Trainer(net.collect_params(), 'sgd', 
+    trainer = gluon.Trainer(feat_net.collect_params(), 'sgd', 
             {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.mom, 'multi_precision': True},
-            kvstore=kv)
+            )
+
+    cls_trainers = []
+    for i in range(args.ctx_num):
+        _trainer = gluon.Trainer(cls_nets[i].collect_params(), 'sgd', 
+                {'learning_rate': args.lr, 'wd': args.wd, 'momentum': args.mom, 'multi_precision': True},
+                )
+        cls_trainers.append(_trainer)
 
     def _batch_callback():
       mbatch = global_step[0]
@@ -297,10 +297,9 @@ def train_net(args):
       for _lr in lr_steps:
         if mbatch==_lr:
           args.lr *= 0.1
-          if args.mode=='gluon':
-            trainer.set_learning_rate(args.lr)
-          else:
-            opt.lr  = args.lr
+          trainer.set_learning_rate(args.lr)
+          for _trainer in cls_trainers:
+              _trainer.set_learning_rate(args.lr)
           print('lr change to', args.lr)
           break
 
@@ -313,8 +312,9 @@ def train_net(args):
         msave = save_step[0]
         do_save = False
         is_highest = False
-        tnet = TestBlock(args, params = net.collect_params())
-        tnet.hybridize()
+        tnet = FeatBlock(args, is_train=False, params = feat_net.collect_params())
+        if args.hybrid:
+          tnet.hybridize()
         acc_list = ver_test(mbatch, tnet)
         if len(acc_list)>0:
           lfw_score = acc_list[0]
@@ -334,7 +334,8 @@ def train_net(args):
           #print('saving gluon params')
           fname = args.prefix+"-gluon.params"
           tnet.save_parameters(fname)
-          tnet.export(args.prefix, msave)
+          if args.hybrid:
+            tnet.export(args.prefix, msave)
           #arg, aux = model.get_params()
           #mx.model.save_checkpoint(prefix, msave, model.symbol, arg, aux)
         print('[%d]Accuracy-Highest: %1.5f'%(mbatch, highest_acc[-1]))
@@ -342,10 +343,17 @@ def train_net(args):
         sys.exit(0)
 
 
-    loss_weight = 1.0
+    #loss_weight = 1.0
     #loss = gluon.loss.SoftmaxCrossEntropyLoss(weight = loss_weight)
     #loss = nd.SoftmaxOutput
     loss = gluon.loss.SoftmaxCrossEntropyLoss()
+    tmp_ctx = mx.gpu(0)
+    cpu_ctx = mx.cpu()
+    cache = NPCache()
+    #ctx_fc7_max = mx.np.zeros( (args.batch_size, args.ctx_num), dtype=np.float32, ctx=cpu_ctx)
+    #global_fc7_max = mx.np.zeros( (args.batch_size, 1), dtype=np.float32, ctx=cpu_ctx)
+    #local_fc7_sum = mx.np.zeros((args.batch_size,1), ctx=cpu_ctx)
+    #local_fc1_grad = mx.np.zeros( (args.batch_size,args.emb_size), ctx=cpu_ctx)
     while True:
         #trainer = update_learning_rate(opt.lr, trainer, epoch, opt.lr_factor, lr_steps)
         tic = time.time()
@@ -354,39 +362,146 @@ def train_net(args):
         btic = time.time()
         #for i, batch in enumerate(train_iter):
         for batch_idx, (x, y) in enumerate(loader):
+            y = y.astype(np.float32)
             #print(x.shape, y.shape)
+            #print(x.dtype, y.dtype)
             _batch_callback()
             #data = gluon.utils.split_and_load(batch.data[0].astype(opt.dtype), ctx_list=ctx, batch_axis=0)
             #label = gluon.utils.split_and_load(batch.label[0].astype(opt.dtype), ctx_list=ctx, batch_axis=0)
             data = gluon.utils.split_and_load(x, ctx_list=ctx, batch_axis=0)
             label = gluon.utils.split_and_load(y, ctx_list=ctx, batch_axis=0)
-            outputs = []
-            losses = []
+            #outputs = []
+            #losses = []
+            fc1_list = []
+            fc1_out_list = []
+            fc1_list_cpu = []
+            fc7_list = []
             with ag.record():
                 for _data, _label in zip(data, label):
                     #print(y.asnumpy())
-                    fc7 = net(_data, _label)
-                    #print(z[0].shape, z[1].shape)
-                    losses.append(loss(fc7, _label))
-                    outputs.append(fc7)
-            for l in losses:
-                l.backward()
-            #trainer.step(batch.data[0].shape[0], ignore_stale_grad=True)
-            #trainer.step(args.ctx_num)
-            n = x.shape[0]
-            #print(n,n)
-            trainer.step(n)
-            metric.update(label, outputs)
+                    fc1 = feat_net(_data)
+                    fc1_out_list.append(fc1)
+                    #fc1_list.append(fc1)
+            for _fc1 in fc1_out_list:
+                #fc1_cpu = cache.get2(cpu_ctx, 'fc1_cpu', _fc1)
+                fc1_cpu = _fc1.as_in_ctx(cpu_ctx)
+                fc1_list_cpu.append(fc1_cpu)
+            global_fc1 = cache.get(cpu_ctx, 'global_fc1_cpu', (args.batch_size, args.emb_size))
+            mx.np.concatenate(fc1_list_cpu, axis=0, out=global_fc1)
+                #mean = mx.np.mean(global_fc1, axis=[0])
+                #var = mx.np.var(global_fc1, axis=[0])
+                #var = mx.np.sqrt(var + 2e-5)
+                #global_fc1 = (global_fc1 - mean) / var
+            _xlist = []
+            _ylist = []
+            for i, cls_net in enumerate(cls_nets):
+                _ctx = mx.gpu(i)
+                _y = cache.get2(_ctx, 'ctxy', y)
+                _y -= args.ctx_class_start[i]
+                _x = cache.get2(_ctx, 'ctxfc1', global_fc1)
+                _xlist.append(_x)
+                _ylist.append(_y)
+            with ag.record():
+                for i, cls_net in enumerate(cls_nets):
+                    _ctx = mx.gpu(i)
+                    _x = _xlist[i]
+                    _y = _ylist[i]
+                    #_y = cache.get2(_ctx, 'ctxy', y)
+                    #_y -= args.ctx_class_start[i]
+                    #_x = cache.get2(_ctx, 'ctxfc1', global_fc1)
+                    #_x = global_fc1.as_in_ctx(_ctx)
+                    _x.attach_grad()
+                    _fc7 = cls_net(_x, _y)
+                    fc7_list.append(_fc7)
+                    fc1_list.append(_x)
+            #print('log A')
+            fc7_grads = [None] * args.ctx_num
+            ctx_fc7_max = cache.get(cpu_ctx, 'gctxfc7max', (args.batch_size, args.ctx_num))
+            ctx_fc7_max[:,:] = 0.0
+            for i, cls_net in enumerate(cls_nets):
+                _fc7 = fc7_list[i]
+                _max = cache.get(_fc7.context, 'ctxfc7max', (args.batch_size,))
+                #_max = cache.get(cpu_ctx, 'ctxfc7max', (args.batch_size, ))
+                mx.np.max(_fc7, axis=1, out=_max)
+                #_cpumax = cache.get2(cpu_ctx, 'ctxfc7maxcpu', _max)
+                _cpumax = _max.as_in_ctx(cpu_ctx)
+                ctx_fc7_max[:, i] = _cpumax
+                fc7_grads[i] = cache.get2(_fc7.context, 'fc7grad', _fc7)
+            #nd.max(ctx_fc7_max, axis=1, keepdims=True, out=local_fc7_max)
+            global_fc7_max = cache.get(cpu_ctx, 'globalfc7max', (args.batch_size, 1))
+            mx.np.max(ctx_fc7_max, axis=1, keepdims=True, out=global_fc7_max)
+            local_fc7_sum = cache.get(cpu_ctx, 'local_fc7_sum', (args.batch_size, 1))
+            local_fc7_sum[:,:] = 0.0
+
+            for i, cls_net in enumerate(cls_nets):
+              _ctx = mx.gpu(i)
+              #_max = global_fc7_max.as_in_ctx(mx.gpu(i))
+              _max = cache.get2(_ctx, 'fc7maxgpu', global_fc7_max)
+              fc7_grads[i] -= _max
+              #mx.np.exp(fc7_grads[i], out=fc7_grads[i])
+              fc7_grads[i] = mx.np.exp(fc7_grads[i])
+              #_sum = cache.get(cpu_ctx, 'ctxfc7sum', (args.batch_size, 1))
+              _sum = cache.get(_ctx, 'ctxfc7sum', (args.batch_size, 1))
+              mx.np.sum(fc7_grads[i], axis=1, keepdims=True, out=_sum)
+              #_cpusum = cache.get2(cpu_ctx, 'ctxfc7maxcpu', _max)
+              _cpusum = _sum.as_in_ctx(cpu_ctx)
+              local_fc7_sum += _cpusum
+            global_fc7_sum = local_fc7_sum
+
+            #print('log B')
+            local_fc1_grad = cache.get(cpu_ctx, 'localfc1grad', (args.batch_size, args.emb_size))
+            local_fc1_grad[:,:] = 0.0
+
+            for i, cls_net in enumerate(cls_nets):
+              #_sum = global_fc7_sum.as_in_ctx(mx.gpu(i))
+              _ctx = mx.gpu(i)
+              _sum = cache.get2(_ctx, 'globalfc7sumgpu', global_fc7_sum)
+              fc7_grads[i] /= _sum
+              a = i*args.ctx_num_classes
+              b = (i+1)*args.ctx_num_classes
+              _y = cache.get2(_ctx, 'ctxy2', y)
+              _y -= args.ctx_class_start[i]
+              _yonehot = cache.get(_ctx, 'yonehot', (args.batch_size, args.ctx_num_classes))
+              mx.npx.one_hot(_y, depth=args.ctx_num_classes, on_value=1.0, off_value=0.0, out=_yonehot)
+              #_label = (y - args.ctx_class_start[i]).as_in_ctx(mx.gpu(i))
+              #_label = mx.npx.one_hot(_label, depth=args.ctx_num_classes, on_value=1.0, off_value=0.0)
+              fc7_grads[i] -= _yonehot
+              fc7_list[i].backward(fc7_grads[i])
+              fc1 = fc1_list[i]
+              #fc1_grad = cache.get2(cpu_ctx, 'fc1gradcpu', fc1.grad)
+              fc1_grad = fc1.grad.as_in_ctx(cpu_ctx)
+              #print(fc1.grad.dtype, fc1.grad.shape)
+              #print(fc1.grad[0:5,0:5])
+              local_fc1_grad += fc1_grad
+              cls_trainers[i].step(args.batch_size)
+            #print('log C')
+            for i in range(args.ctx_num):
+                p = args.batch_size//args.ctx_num
+                a = p*i
+                b = p*(i+1)
+                _fc1_grad = local_fc1_grad[a:b, :]
+                _grad = cache.get2(mx.gpu(i), 'fc1gradgpu', _fc1_grad)
+                #_grad = local_fc1_grad[a:b,:].as_in_ctx(mx.gpu(i))
+                #print(i, fc1_out_list[i].shape, _grad.shape)
+                fc1_out_list[i].backward(_grad)
+            #print('log D')
+            trainer.step(args.batch_size)
+            #print('after step')
+            mx.npx.waitall()
             i = batch_idx
             if i>0 and i%20==0:
-                name, acc = metric.get()
-                if len(name)==2:
-                  logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f, %s=%f'%(
-                                 num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0], name[1], acc[1]))
-                else:
-                  logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f'%(
-                                 num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0]))
-                #metric.reset()
+                logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec'%(
+                               num_epochs, i, args.batch_size/(time.time()-btic) ))
+            #metric.update(label, outputs)
+            #if i>0 and i%20==0:
+            #    name, acc = metric.get()
+            #    if len(name)==2:
+            #      logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f, %s=%f'%(
+            #                     num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0], name[1], acc[1]))
+            #    else:
+            #      logger.info('Epoch[%d] Batch [%d]\tSpeed: %f samples/sec\t%s=%f'%(
+            #                     num_epochs, i, args.batch_size/(time.time()-btic), name[0], acc[0]))
+            #    #metric.reset()
             btic = time.time()
 
         epoch_time = time.time()-tic

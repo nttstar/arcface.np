@@ -13,7 +13,10 @@ class ArcMarginBlock(gluon.HybridBlock):
       self.margin_a = args.margin_a
       self.margin_b = args.margin_b
       self.num_classes = args.num_classes
+      if args.ctx_num_classes is not None:
+          self.num_classes = args.ctx_num_classes
       self.emb_size = args.emb_size
+      print('in arc margin', self.num_classes, self.emb_size)
       #self.weight = gluon.Parameter(name = 'fc7_weight', shape = (self.num_classes, self.emb_size))
       #self.weight.initialize()
       #self._weight = nd.empty(shape = (self.num_classes, self.emb_size))

@@ -232,7 +232,8 @@ class ResNet(HybridBlock):
             #self.features.add(nn.GlobalAvgPool2D())
             #self.features.add(nn.Dense(classes, in_units=in_channels*7*7))
             self.features.add(nn.Dense(classes))
-            self.features.add(nn.BatchNorm(scale=False, epsilon=2e-5))
+            #self.feature_scale = nn.BatchNorm(scale=False, epsilon=2e-5)
+            #self.features.add(nn.BatchNorm(scale=False, epsilon=2e-5))
             #self.features.add(nn.BatchNorm(epsilon=2e-5))
 
     def _make_layer(self, block, layers, channels, stride, stage_index, in_channels=0):
@@ -245,10 +246,14 @@ class ResNet(HybridBlock):
                 layer.add(block(channels, 1, False, in_channels=channels, act_type = self.act_type, prefix=''))
         return layer
 
+    def feature(self):
+        return self.features
+
     def hybrid_forward(self, F, x):
         #x = x-127.5
         #x = x*0.0078125
         x = self.features(x)
+        #x = self.feature_scale(x)
         return x
 
 

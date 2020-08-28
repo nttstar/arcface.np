@@ -80,7 +80,7 @@ class FaceDataset(Dataset):
         if self.transform is not None:
             img = self.transform(img)
             img = 2*img-1.0
-        return img, label
+        return img, float(label)
 
 if __name__ == '__main__':
   ds = FaceDataset(data_shape=(3,112,112), path_imgrec = '/gpu/data1/jiaguo/faces_emore/train.rec')
